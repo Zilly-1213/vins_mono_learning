@@ -632,7 +632,7 @@ void Estimator::vector2double()
 
     VectorXd dep = f_manager.getDepthVector();
     for (int i = 0; i < f_manager.getFeatureCount(); i++)
-        para_Feature[i][0] = dep(i);
+        para_Feature[i][0] = dep(i);//存储了在滑动窗口中起始帧非次新帧和最新帧并且可以找到匹配点的所有特征点，按id存储
     if (ESTIMATE_TD)
         para_Td[0][0] = td;
 }
@@ -971,31 +971,32 @@ void Estimator::optimization()
     if (marginalization_flag == MARGIN_OLD)
     {
         MarginalizationInfo *marginalization_info = new MarginalizationInfo();
-        vector2double();
+        vector2double();//这一步其实就是将滑窗内的PQ位姿、v_bias、特征点逆深度都从向量形式转换成double数组的形式
 
         //1、将上一次先验残差项传递给marginalization_info
         if (last_marginalization_info)
         {
             vector<int> drop_set;
-            for (int i = 0; i < static_cast<int>(last_marginalization_parameter_blocks.size()); i++)
+            for (int i = 0; i < static_cast<int>(last_marginalization_parameter_blocks.size()); i++)//通过遍历上一次边缘化中所涉及的变量块地址，如果有当前滑窗内第0帧的位姿和vbias，将其idx加入待边缘化的集合
             {
                 if (last_marginalization_parameter_blocks[i] == para_Pose[0] ||
                     last_marginalization_parameter_blocks[i] == para_SpeedBias[0])
                     drop_set.push_back(i);
             }
             // construct new marginlization_factor
+            //TODO 弄清先验生成成本函数
             MarginalizationFactor *marginalization_factor = new MarginalizationFactor(last_marginalization_info);
             ResidualBlockInfo *residual_block_info = new ResidualBlockInfo(marginalization_factor, NULL,
                                                                            last_marginalization_parameter_blocks,
                                                                            drop_set);
-
             marginalization_info->addResidualBlockInfo(residual_block_info);
         }
 
         //2、将第0帧和第1帧间的IMU因子IMUFactor(pre_integrations[1])，添加到marginalization_info中
         {
-            if (pre_integrations[1]->sum_dt < 10.0)
-            {
+            if (pre_integrations[1]->sum_dt < 10.0)//sum_dt是第0帧到第1帧的预积分值
+            {   
+                //TODO 弄清预积分生成的成本函数
                 IMUFactor* imu_factor = new IMUFactor(pre_integrations[1]);
                 ResidualBlockInfo *residual_block_info = new ResidualBlockInfo(imu_factor, NULL,
                                                                            vector<double *>{para_Pose[0], para_SpeedBias[0], para_Pose[1], para_SpeedBias[1]},
@@ -1007,10 +1008,10 @@ void Estimator::optimization()
         //3、将第一次观测为第0帧的所有路标点对应的视觉观测，添加到marginalization_info中
         {
             int feature_index = -1;
-            for (auto &it_per_id : f_manager.feature)//遍历每个路标点
+            for (auto &it_per_id : f_manager.feature)//遍历滑动窗接口中的每个特征点
             {
                 it_per_id.used_num = it_per_id.feature_per_frame.size();
-                if (!(it_per_id.used_num >= 2 && it_per_id.start_frame < WINDOW_SIZE - 2))
+                if (!(it_per_id.used_num >= 2 && it_per_id.start_frame < WINDOW_SIZE - 2))//这段是多余的。如果该特征点仅在单帧出现过或者其起始帧为次新帧或最新帧，则跳过
                     continue;
 
                 ++feature_index;
@@ -1021,11 +1022,11 @@ void Estimator::optimization()
 
                 Vector3d pts_i = it_per_id.feature_per_frame[0].point;//取出该路标点在第0帧也就是起始帧的坐标pts_i
 
-                for (auto &it_per_frame : it_per_id.feature_per_frame)
+                for (auto &it_per_frame : it_per_id.feature_per_frame)//遍历该特征点所有出现过的帧
                 {
-                    imu_j++;//这个在第一次自增必定会发生吧，也就是说j只对应起始帧（即第0帧）以外其他帧，pts_j为该路标点
+                    imu_j++;//这个在第一次自增必定会发生吧，也就是说j只对应起始帧（即第0帧）以外其他的帧号
                     if (imu_i == imu_j)
-                        continue;
+                        continue;//忽略第0帧的特征点
 
                     Vector3d pts_j = it_per_frame.point;
                     if (ESTIMATE_TD)
@@ -1040,9 +1041,10 @@ void Estimator::optimization()
                     }
                     else
                     {
+                        //TODO 弄清生成的视觉成本函数
                         ProjectionFactor *f = new ProjectionFactor(pts_i, pts_j);//有n个以第0帧为起始帧的路标点,假设每个这样的路标点有m个共视帧，则有n*m个损失函数，也就会有n*m个视觉残差块，而IMU残差和先验残差只有一个
                         ResidualBlockInfo *residual_block_info = new ResidualBlockInfo(f, loss_function,
-                                                                                       vector<double *>{para_Pose[imu_i], para_Pose[imu_j], para_Ex_Pose[0], para_Feature[feature_index]},
+                                                                                       vector<double *>{para_Pose[imu_i], para_Pose[imu_j], para_Ex_Pose[0], para_Feature[feature_index]},//这里添加的是起始帧为第0帧的特征点在第0帧的逆深度
                                                                                        vector<int>{0, 3});
                         marginalization_info->addResidualBlockInfo(residual_block_info);
                     }
@@ -1067,8 +1069,8 @@ void Estimator::optimization()
         std::unordered_map<long, double *> addr_shift;
         for (int i = 1; i <= WINDOW_SIZE; i++)
         {
-            addr_shift[reinterpret_cast<long>(para_Pose[i])] = para_Pose[i - 1];
-            addr_shift[reinterpret_cast<long>(para_SpeedBias[i])] = para_SpeedBias[i - 1];
+            addr_shift[reinterpret_cast<long>(para_Pose[i])] = para_Pose[i - 1];//即将当前滑窗内第0帧的地址放到映射表中第1帧中，也就说明如果在下一次要找上一次滑窗中第1帧的数据，要去当前滑窗的第0帧找相应的数据
+            addr_shift[reinterpret_cast<long>(para_SpeedBias[i])] = para_SpeedBias[i - 1];//同上
         }
         for (int i = 0; i < NUM_OF_CAM; i++)
             addr_shift[reinterpret_cast<long>(para_Ex_Pose[i])] = para_Ex_Pose[i];
@@ -1076,7 +1078,7 @@ void Estimator::optimization()
         {
             addr_shift[reinterpret_cast<long>(para_Td[0])] = para_Td[0];
         }
-        vector<double *> parameter_blocks = marginalization_info->getParameterBlocks(addr_shift);
+        vector<double *> parameter_blocks = marginalization_info->getParameterBlocks(addr_shift);//本次边缘化保留下来的变量在下一个滑窗中的地址
 
         if (last_marginalization_info)//如果是第一次进入边缘化则不会执行这块
             delete last_marginalization_info;
@@ -1085,7 +1087,7 @@ void Estimator::optimization()
         
     }
 
-    //如果次新帧不是关键帧：
+    //如果次新帧不是关键帧，则丢弃次新帧，仅保留次新帧的IMU数据：
     else
     {
         if (last_marginalization_info &&

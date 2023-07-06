@@ -5,12 +5,12 @@ void ResidualBlockInfo::Evaluate()
     residuals.resize(cost_function->num_residuals());//损失函数对应的残差维数大小
 
     std::vector<int> block_sizes = cost_function->parameter_block_sizes();
-    raw_jacobians = new double *[block_sizes.size()];//定义了一个指向变量块尺寸的地址数组
-    jacobians.resize(block_sizes.size());//损失函数的优化变量块的对应个雅可比矩阵
+    raw_jacobians = new double *[block_sizes.size()];//定义了一个雅可比矩阵指针数组，长度为变量块的个数，有多少变量块就有多少雅可比矩阵
+    jacobians.resize(block_sizes.size());//size同上，只不过是元素为雅可比矩阵的向量
 
     for (int i = 0; i < static_cast<int>(block_sizes.size()); i++)
     {
-        jacobians[i].resize(cost_function->num_residuals(), block_sizes[i]);//雅可比矩阵：如果是IMU残差对应的雅可比则size为15*m,如果是视觉则是2*m，m为优化变量块的size
+        jacobians[i].resize(cost_function->num_residuals(), block_sizes[i]);//雅可比矩阵：如果是IMU残差对应的雅可比则size为15*m,如果是视觉则是2*m，m为变量块的size
         raw_jacobians[i] = jacobians[i].data();//残差第i个雅可比矩阵对应的指针放入到raw_jacobians[i]中
         //dim += block_sizes[i] == 7 ? 6 : block_sizes[i];
     }
@@ -114,19 +114,20 @@ void MarginalizationInfo::addResidualBlockInfo(ResidualBlockInfo *residual_block
 void MarginalizationInfo::preMarginalize()
 {
     for (auto it : factors)
-    {
+    {   
+        //TODO Evaluate 弄清残差和雅可比矩阵集的计算
         it->Evaluate();//调用的是ResidualBlockInfo中的Evaluate，这一步会对每个添加进margin的残差块计算对应的残差；以及残差对应的优化变量块个雅可比矩阵
 
-        std::vector<int> block_sizes = it->cost_function->parameter_block_sizes();
+        std::vector<int> block_sizes = it->cost_function->parameter_block_sizes();//获取当前残差块内每个变量块的大小并存到整形向量中
         for (int i = 0; i < static_cast<int>(block_sizes.size()); i++)
         {
-            long addr = reinterpret_cast<long>(it->parameter_blocks[i]);//将变量块第一个地址转为long
-            int size = block_sizes[i];
+            long addr = reinterpret_cast<long>(it->parameter_blocks[i]);//将变量块第一个变量的地址强制转为long
+            int size = block_sizes[i];//第i个变量块的大小
             if (parameter_block_data.find(addr) == parameter_block_data.end())//如果发现map中的key没有这个优化变量块的地址
             {
                 double *data = new double[size];//开辟一块新内存来存放优化变量块
                 memcpy(data, it->parameter_blocks[i], sizeof(double) * size);
-                parameter_block_data[addr] = data;//取出残差的优化变量块第一个变量的地址作为value，key是变量块在parameter_blocks中的原始地址
+                parameter_block_data[addr] = data;//以该变量块新开辟的内存地址作为value，key是变量块在parameter_blocks中的原始地址
             }
         }
     }
@@ -153,16 +154,16 @@ void* ThreadsConstructA(void* threadsstruct)
             int size_i = p->parameter_block_size[reinterpret_cast<long>(it->parameter_blocks[i])];//从图中根据内存地址取出该变量块的size
             if (size_i == 7)//如果是pose变量块,调整size
                 size_i = 6;
-            Eigen::MatrixXd jacobian_i = it->jacobians[i].leftCols(size_i);//取原雅可比矩阵的左size_i列
-            for (int j = i; j < static_cast<int>(it->parameter_blocks.size()); j++)//还需要考虑该残差块的其他优化变量块
+            Eigen::MatrixXd jacobian_i = it->jacobians[i].leftCols(size_i);//取原雅可比矩阵的左size_i列，这里实际上只对变量块为位姿的jacobians起作用
+            for (int j = i; j < static_cast<int>(it->parameter_blocks.size()); j++)//在该雅可比之后的其他优化变量块对应的雅可比
             {
                 int idx_j = p->parameter_block_idx[reinterpret_cast<long>(it->parameter_blocks[j])];
                 int size_j = p->parameter_block_size[reinterpret_cast<long>(it->parameter_blocks[j])];
                 if (size_j == 7)
                     size_j = 6;
                 Eigen::MatrixXd jacobian_j = it->jacobians[j].leftCols(size_j);
-                if (i == j)//如果是同一个优化变量块的雅可比矩阵，信息块的计算方式比较简单
-                    p->A.block(idx_i, idx_j, size_i, size_j) += jacobian_i.transpose() * jacobian_j;//将信息块贴到线程的整个信息矩阵对应的位置中，以视觉残差的pose块为例，计算为(6,2)*(2,6)
+                if (i == j)//如果是同一个优化变量块的雅可比矩阵，信息块的就和自身转置相乘，并贴在对角线位置
+                    p->A.block(idx_i, idx_j, size_i, size_j) += jacobian_i.transpose() * jacobian_j;//将信息块累加地贴到线程的整个信息矩阵对应位置中，即以idx_i和idx_j为左上角起点，size_i和size_j为信息块的高和宽，以视觉残差的pose块为例，计算为(6,2)*(2,6)
                 else//如果是两个不同优化变量块的雅可比矩阵，信息块贴在对应位置后，将其转置后需要贴在沿对角线的对称位置。
                 {
                     p->A.block(idx_i, idx_j, size_i, size_j) += jacobian_i.transpose() * jacobian_j;
@@ -238,7 +239,7 @@ void MarginalizationInfo::marginalize()
     TicToc t_thread_summing;
     pthread_t tids[NUM_THREADS];
     ThreadsStruct threadsstruct[NUM_THREADS];//这个线程参数结构应该是专门用来存储计算每个残差的黑塞矩阵和b向量的参数
-    //接下来为每个线程参数结构分配需要残差块中的参数信息
+    //接下来为每个线程参数结构分配残差块中的参数信息
     int i = 0;
     for (auto it : factors)
     {
@@ -252,8 +253,8 @@ void MarginalizationInfo::marginalize()
         TicToc zero_matrix;
         threadsstruct[i].A = Eigen::MatrixXd::Zero(pos,pos);
         threadsstruct[i].b = Eigen::VectorXd::Zero(pos);
-        threadsstruct[i].parameter_block_size = parameter_block_size;//所以这里是把边缘化部分整个优化变量size的map给到每个线程了？
-        threadsstruct[i].parameter_block_idx = parameter_block_idx;
+        threadsstruct[i].parameter_block_size = parameter_block_size;//所以这里是把边缘化部分所有涉及的优化变量块和size的映射都共享到每个线程了
+        threadsstruct[i].parameter_block_idx = parameter_block_idx;//同上
         int ret = pthread_create( &tids[i], NULL, ThreadsConstructA ,(void*)&(threadsstruct[i]));//将线程参数以及执行的具体计算函数绑定后分配线程
         if (ret != 0)
         {
@@ -271,7 +272,7 @@ void MarginalizationInfo::marginalize()
     //ROS_INFO("A diff %f , b diff %f ", (A - tmp_A).sum(), (b - tmp_b).sum());
 
 
-    Eigen::MatrixXd Amm = 0.5 * (A.block(0, 0, m, m) + A.block(0, 0, m, m).transpose());
+    Eigen::MatrixXd Amm = 0.5 * (A.block(0, 0, m, m) + A.block(0, 0, m, m).transpose());//TODO 为什么要这么处理？
     Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> saes(Amm);//提取Amm的特征值与特征向量
 
     //ROS_ASSERT_MSG(saes.eigenvalues().minCoeff() >= -1e-4, "min eigenvalue %f", saes.eigenvalues().minCoeff());
@@ -289,7 +290,7 @@ void MarginalizationInfo::marginalize()
     b = brr - Arm * Amm_inv * bmm;
 
     Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> saes2(A);
-    Eigen::VectorXd S = Eigen::VectorXd((saes2.eigenvalues().array() > eps).select(saes2.eigenvalues().array(), 0));
+    Eigen::VectorXd S = Eigen::VectorXd((saes2.eigenvalues().array() > eps).select(saes2.eigenvalues().array(), 0));//TODO 弄清其特征值对角阵生成过程
     Eigen::VectorXd S_inv = Eigen::VectorXd((saes2.eigenvalues().array() > eps).select(saes2.eigenvalues().array().inverse(), 0));
 
     Eigen::VectorXd S_sqrt = S.cwiseSqrt();
@@ -313,7 +314,7 @@ std::vector<double *> MarginalizationInfo::getParameterBlocks(std::unordered_map
 
     for (const auto &it : parameter_block_idx)
     {
-        if (it.second >= m)
+        if (it.second >= m)//即边缘化以外的变量
         {
             keep_block_size.push_back(parameter_block_size[it.first]);
             keep_block_idx.push_back(parameter_block_idx[it.first]);

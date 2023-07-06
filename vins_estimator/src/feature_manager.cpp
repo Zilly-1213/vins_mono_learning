@@ -78,7 +78,7 @@ bool FeatureManager::addFeatureCheckParallax(int frame_count, const map<int, vec
         //有的话把图像帧添加进去
         else if (it->feature_id == feature_id)
         {
-            it->feature_per_frame.push_back(f_per_fra);
+            it->feature_per_frame.push_back(f_per_fra);//相当于把当前id对应的特征点在当前帧的状态加入到各帧状态列表中，这样就知道该id对应的特征点在一帧中是否有匹配的点，以及对应的横纵坐标、逆深度等信息了
             last_track_num++;
         }
     }

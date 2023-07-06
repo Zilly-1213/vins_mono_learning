@@ -55,7 +55,7 @@ class MarginalizationInfo
     void marginalize();
     std::vector<double *> getParameterBlocks(std::unordered_map<long, double *> &addr_shift);
 
-    std::vector<ResidualBlockInfo *> factors;//所有观测项
+    std::vector<ResidualBlockInfo *> factors;//所有残差块（先验、IMU、多个视觉残差块）
     int m, n;//m为要边缘化的变量个数，n为要保留下来的变量个数
     std::unordered_map<long, int> parameter_block_size; //<优化变量内存地址,localSize>
     int sum_block_size;
